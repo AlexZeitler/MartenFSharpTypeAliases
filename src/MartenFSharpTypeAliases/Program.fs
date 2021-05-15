@@ -1,7 +1,10 @@
 ﻿module Domain =
   open System
+  type CustomerNumber = CustomerNumber of string
 
-  type RegisteredCustomer = { CompanyName: string }
+  type RegisteredCustomer =
+    { CompanyName: string
+      Number: CustomerNumber }
 
   type DeletedCustomer =
     { CompanyName: string
@@ -13,7 +16,11 @@
     | Deleted of DeletedCustomer
 
 module Commands =
-  type CustomerRegistration = { CompanyName: string }
+  open Domain
+
+  type CustomerRegistration =
+    { CompanyName: string
+      Number: CustomerNumber }
 
   type Command =
     | Register of CustomerRegistration
@@ -21,7 +28,12 @@ module Commands =
 
 module DomainEvents =
   open System
-  type CustomerRegisteredEvent = { CompanyName: string }
+  open Domain
+
+  type CustomerRegisteredEvent =
+    { CompanyName: string
+      Number: CustomerNumber }
+
   type CustomerDeletedEvent = { DeletedOn: DateTimeOffset }
 
   type CustomerEvent =
@@ -38,7 +50,9 @@ module CommandHandler =
   let decide state command =
     match (command, state) with
     | Register customerRegistration, Unregistered ->
-        Ok [ CustomerRegistered { CompanyName = customerRegistration.CompanyName } ]
+        Ok [ CustomerRegistered
+               { CompanyName = customerRegistration.CompanyName
+                 Number = customerRegistration.Number } ]
     | Register _, Registered _ -> Error ""
     | Register _, Deleted _ -> Error "Cannot register a deleted customer"
     | Delete, Registered _ -> Ok [ CustomerDeleted { DeletedOn = DateTimeOffset.Now } ]
@@ -52,7 +66,9 @@ module EventHandler =
   let evolve (state: Customer) event : Customer =
     match event with
     | CustomerRegistered registeredCustomer ->
-        Registered { CompanyName = registeredCustomer.CompanyName }
+        Registered
+          { CompanyName = registeredCustomer.CompanyName
+            Number = registeredCustomer.Number }
     | CustomerDeleted deleted ->
         match state with
         | Registered registered ->
@@ -186,7 +202,9 @@ open EventHandler
 [<EntryPoint>]
 let main _ =
   let register =
-    Register { CompanyName = "Some Company" }
+    Register
+      { CompanyName = "Some Company"
+        Number = CustomerNumber "0001" }
 
   let registeredCustomer = decide Unregistered register
   let id = Guid.NewGuid()
@@ -198,7 +216,9 @@ let main _ =
       let customerState : Customer = rebuild events
 
       match customerState with
-      | Registered customer -> printfn $"successfully registered customer {customer.CompanyName}"
+      | Registered customer ->
+          printfn
+            $"successfully registered customer {customer.CompanyName} with Number {customer.Number}"
       | _ -> failwith "todo"
 
   | Error error -> printfn $"Error handling registration: {error}"
