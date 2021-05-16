@@ -2,7 +2,7 @@
 
 This sample shows an Event Sourcing implementation with [Marten DB](https://github.com/JasperFx/marten) and F#.
 
-The [Domain Model](https://github.com/AlexZeitler/MartenFSharpTypeAliases/blob/main/src/MartenFSharpTypeAliases/Program.fs#L1) contains Type Aliases as described [here](https://www.softwarepark.cc/blog/2020/8/7/understanding-f-type-aliases).
+The [Domain Model](https://github.com/AlexZeitler/MartenFSharpTypeAliases/blob/main/src/MartenFSharpTypeAliases/Program.fs#L131) contains Type Aliases as described [here](https://www.softwarepark.cc/blog/2020/8/7/understanding-f-type-aliases).
 
 The challenge was to get the Marten serializer to serialize the Type alias
 
