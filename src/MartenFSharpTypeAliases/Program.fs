@@ -1,7 +1,140 @@
-﻿module Domain =
+﻿open Newtonsoft.Json
+
+module IdiomaticJson =
+
+  open Microsoft.FSharp.Reflection
   open System
 
-  type RegisteredCustomer = { CompanyName: string }
+  type IdiomaticDuConverter() =
+    inherit JsonConverter()
+
+    [<Literal>]
+    let discriminator = "__Case"
+
+    let primitives =
+      Set [ JsonToken.Boolean
+            JsonToken.Date
+            JsonToken.Float
+            JsonToken.Integer
+            JsonToken.Null
+            JsonToken.String ]
+
+    let writeValue (value: obj) (serializer: JsonSerializer, writer: JsonWriter) =
+      if value.GetType().IsPrimitive then
+        writer.WriteValue value
+      else
+        serializer.Serialize(writer, value)
+
+    let writeProperties (fields: obj array) (serializer: JsonSerializer, writer: JsonWriter) =
+      fields
+      |> Array.iteri
+           (fun index value ->
+             writer.WritePropertyName(sprintf "Item%d" index)
+             (serializer, writer) |> writeValue value)
+
+    let writeDiscriminator (name: string) (writer: JsonWriter) =
+      writer.WritePropertyName discriminator
+      writer.WriteValue name
+
+    override __.WriteJson(writer, value, serializer) =
+      let unionCases =
+        FSharpType.GetUnionCases(value.GetType())
+
+      let unionType = value.GetType()
+
+      let case, fields =
+        FSharpValue.GetUnionFields(value, unionType)
+
+      let allCasesHaveValues =
+        unionCases
+        |> Seq.forall (fun c -> c.GetFields() |> Seq.length > 0)
+
+      match unionCases.Length, fields, allCasesHaveValues with
+      | 2, [||], false -> writer.WriteNull()
+      | 1, [| singleValue |], _
+      | 2, [| singleValue |], false -> (serializer, writer) |> writeValue singleValue
+      | 1, fields, _
+      | 2, fields, false ->
+          writer.WriteStartObject()
+          (serializer, writer) |> writeProperties fields
+          writer.WriteEndObject()
+      | _ ->
+          writer.WriteStartObject()
+          writer |> writeDiscriminator case.Name
+          (serializer, writer) |> writeProperties fields
+          writer.WriteEndObject()
+
+    override __.ReadJson(reader, destinationType, _, _) =
+      let parts =
+        if reader.TokenType <> JsonToken.StartObject then
+          [| (JsonToken.Undefined, obj ()), (reader.TokenType, reader.Value) |]
+        else
+          seq {
+            yield!
+              reader
+              |> Seq.unfold
+                   (fun reader ->
+                     if reader.Read() then
+                       Some((reader.TokenType, reader.Value), reader)
+                     else
+                       None)
+          }
+          |> Seq.takeWhile (fun (token, _) -> token <> JsonToken.EndObject)
+          |> Seq.pairwise
+          |> Seq.mapi (fun id value -> id, value)
+          |> Seq.filter (fun (id, _) -> id % 2 = 0)
+          |> Seq.map snd
+          |> Seq.toArray
+
+      let values =
+        parts
+        |> Seq.filter (fun ((_, keyValue), _) -> keyValue <> (discriminator :> obj))
+        |> Seq.map snd
+        |> Seq.filter (fun (valueToken, _) -> primitives.Contains valueToken)
+        |> Seq.map snd
+        |> Seq.toArray
+
+      let case =
+        let unionCases =
+          FSharpType.GetUnionCases(destinationType)
+
+        let unionCase =
+          parts
+          |> Seq.tryFind (fun ((_, keyValue), _) -> keyValue = (discriminator :> obj))
+          |> Option.map (snd >> snd)
+
+        match unionCase with
+        | Some case ->
+            unionCases
+            |> Array.find (fun f -> f.Name :> obj = case)
+        | None ->
+            // implied union case
+            match values with
+            | [| null |] ->
+                unionCases
+                |> Array.find (fun c -> c.GetFields().Length = 0)
+            | _ ->
+                unionCases
+                |> Array.find (fun c -> c.GetFields().Length > 0)
+
+      let values =
+        case.GetFields()
+        |> Seq.zip values
+        |> Seq.map
+             (fun (value, propertyInfo) -> Convert.ChangeType(value, propertyInfo.PropertyType))
+        |> Seq.toArray
+
+      FSharpValue.MakeUnion(case, values)
+
+    override __.CanConvert(objectType) = FSharpType.IsUnion objectType
+
+module Domain =
+  open System
+  type CustomerNumber = CustomerNumber of string
+
+  type RegisteredCustomer =
+    { CompanyName: string
+      Number: CustomerNumber }
 
   type DeletedCustomer =
     { CompanyName: string
@@ -13,7 +146,11 @@
     | Deleted of DeletedCustomer
 
 module Commands =
-  type CustomerRegistration = { CompanyName: string }
+  open Domain
+
+  type CustomerRegistration =
+    { CompanyName: string
+      Number: CustomerNumber }
 
   type Command =
     | Register of CustomerRegistration
@@ -21,7 +158,12 @@ module Commands =
 
 module DomainEvents =
   open System
-  type CustomerRegisteredEvent = { CompanyName: string }
+  open Domain
+
+  type CustomerRegisteredEvent =
+    { CompanyName: string
+      Number: CustomerNumber }
+
   type CustomerDeletedEvent = { DeletedOn: DateTimeOffset }
 
   type CustomerEvent =
@@ -38,7 +180,9 @@ module CommandHandler =
   let decide state command =
     match (command, state) with
     | Register customerRegistration, Unregistered ->
-        Ok [ CustomerRegistered { CompanyName = customerRegistration.CompanyName } ]
+        Ok [ CustomerRegistered
+               { CompanyName = customerRegistration.CompanyName
+                 Number = customerRegistration.Number } ]
     | Register _, Registered _ -> Error ""
     | Register _, Deleted _ -> Error "Cannot register a deleted customer"
     | Delete, Registered _ -> Ok [ CustomerDeleted { DeletedOn = DateTimeOffset.Now } ]
@@ -52,7 +196,9 @@ module EventHandler =
   let evolve (state: Customer) event : Customer =
     match event with
     | CustomerRegistered registeredCustomer ->
-        Registered { CompanyName = registeredCustomer.CompanyName }
+        Registered
+          { CompanyName = registeredCustomer.CompanyName
+            Number = registeredCustomer.Number }
     | CustomerDeleted deleted ->
         match state with
         | Registered registered ->
@@ -109,6 +255,16 @@ module EventStore =
 
 
   let store =
+    let serializer = Marten.Services.JsonNetSerializer()
+
+    serializer.EnumStorage = EnumStorage.AsString
+    |> ignore
+
+    serializer.Customize
+      (fun jsonSerializer -> jsonSerializer.Converters.Add(IdiomaticJson.IdiomaticDuConverter()))
+    // Code directly against a Newtonsoft.Json JsonSerializer
+
+
     DocumentStore.For
       (fun options ->
         let connectionString =
@@ -120,6 +276,7 @@ module EventStore =
             "marten"
             "123456"
 
+        options.Serializer(serializer)
         options.Connection(connectionString)
         options.AutoCreateSchemaObjects <- AutoCreate.All)
 
@@ -186,7 +343,9 @@ open EventHandler
 [<EntryPoint>]
 let main _ =
   let register =
-    Register { CompanyName = "Some Company" }
+    Register
+      { CompanyName = "Some Company"
+        Number = CustomerNumber "0001" }
 
   let registeredCustomer = decide Unregistered register
   let id = Guid.NewGuid()
@@ -198,7 +357,9 @@ let main _ =
       let customerState : Customer = rebuild events
 
       match customerState with
-      | Registered customer -> printfn $"successfully registered customer {customer.CompanyName}"
+      | Registered customer ->
+          printfn
+            $"successfully registered customer {customer.CompanyName} with Number {customer.Number}"
       | _ -> failwith "todo"
 
   | Error error -> printfn $"Error handling registration: {error}"
